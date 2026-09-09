@@ -21,3 +21,5 @@ build/
 *.log
 *.tmp
 *.swp
+all.txt
+dev_log.md
