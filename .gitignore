@@ -1,0 +1,23 @@
+# 编译生成的二进制文件
+*.bin
+*.o
+*.elf
+*.img
+*.iso
+
+# 大文件/临时数据
+hdd.img
+cl_os.img
+test.bin
+test_flat.bin
+test.o
+add_header
+
+# 编译输出目录
+build/
+*.vmdk
+
+# 其他临时文件
+*.log
+*.tmp
+*.swp
