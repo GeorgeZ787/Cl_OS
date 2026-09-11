@@ -22,4 +22,6 @@ build/
 *.tmp
 *.swp
 all.txt
-dev_log.md
+dev_log.txt
+v26102.md
+doc

@@ -32,8 +32,10 @@ typedef struct {
 
 void process_init();
 int process_create(const char *filename, const char *argv);
+int process_start_service(const char *name);
 int process_terminate(unsigned int pid);
 int process_kill(unsigned int pid);
+int process_kill_by_name(const char *name);
 void process_list();
 void scheduler();
 void process_yield();

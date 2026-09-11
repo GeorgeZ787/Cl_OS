@@ -142,6 +142,29 @@ int process_create(const char *filename, const char *argv) {
     return process_table[slot].id;
 }
 
+int process_start_service(const char *name) {
+    int slot = find_free_slot();
+    if (slot == -1) return -1;
+
+    process_table[slot].id = next_pid++;
+    process_table[slot].state = PROC_RUNNING;
+    process_table[slot].name[0] = '\0';
+    for (int i = 0; i < PROC_NAME_LEN - 1 && name[i]; i++)
+        process_table[slot].name[i] = name[i];
+    process_table[slot].name[PROC_NAME_LEN - 1] = '\0';
+    process_table[slot].priority = 1;
+    process_table[slot].time_slice = 1;
+    process_table[slot].parent_id = current_pid;
+    process_table[slot].exit_code = 0;
+    process_table[slot].base = 0;
+    process_table[slot].code_size = 0;
+    process_table[slot].data_size = 0;
+    process_table[slot].stack_base = 0;
+    process_table[slot].stack_size = 0;
+    process_count++;
+    return process_table[slot].id;
+}
+
 __attribute__((naked)) void switch_context(unsigned int *old_esp_ptr, unsigned int new_esp) {
     asm volatile(
         "push %%ebp\n"
@@ -210,6 +233,18 @@ int process_terminate(unsigned int pid) {
 
 int process_kill(unsigned int pid) {
     return process_terminate(pid);
+}
+
+int process_kill_by_name(const char *name) {
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        if (process_table[i].state != PROC_TERMINATED) {
+            int j = 0;
+            while (name[j] && process_table[i].name[j] == name[j]) j++;
+            if (!name[j] && !process_table[i].name[j])
+                return process_terminate(process_table[i].id);
+        }
+    }
+    return -1;
 }
 
 void process_list() {

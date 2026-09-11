@@ -81,46 +81,152 @@ void init_heap() {
 #define vga_buf ((unsigned char *)VGA_BASE)
 static int vga_col = 0, vga_row = 0;
 
+/* Keep a bounded line history so the CLI can move its viewport without
+ * changing the behavior of programs that draw directly to VGA memory. */
+#define TERMINAL_HISTORY_LINES 256
+static unsigned short terminal_history[TERMINAL_HISTORY_LINES][VGA_WIDTH];
+static int terminal_line = 0;
+static int terminal_view = 0;
+static int clock_process_pid = -1;
+static unsigned char clock_last_second = 0xFF;
+
+static unsigned char rtc_read(unsigned char reg);
+static unsigned char rtc_bcd_to_binary(unsigned char value);
+static void clock_update(void);
+
 static void move_cursor() {
     unsigned short pos = vga_row * VGA_WIDTH + vga_col;
     outb(0x3D4, 0x0F); outb(0x3D5, (unsigned char)(pos & 0xFF));
     outb(0x3D4, 0x0E); outb(0x3D5, (unsigned char)((pos >> 8) & 0xFF));
 }
 
-static void scroll() {
-    int i;
-    for (i = 0; i < (VGA_HEIGHT - 1) * VGA_WIDTH * 2; i += 2) {
-        vga_buf[i] = vga_buf[i + VGA_WIDTH * 2];
-        vga_buf[i + 1] = vga_buf[i + 1 + VGA_WIDTH * 2];
+static void terminal_fill_line(int line) {
+    for (int x = 0; x < VGA_WIDTH; x++)
+        terminal_history[line][x] = (unsigned short)(vga_attr << 8) | ' ';
+}
+
+static void terminal_render(void) {
+    unsigned short *screen = (unsigned short *)VGA_BASE;
+    for (int y = 0; y < VGA_HEIGHT; y++) {
+        int line = terminal_view + y;
+        for (int x = 0; x < VGA_WIDTH; x++) {
+            screen[y * VGA_WIDTH + x] =
+                (line < TERMINAL_HISTORY_LINES) ? terminal_history[line][x] :
+                (unsigned short)(vga_attr << 8) | ' ';
+        }
     }
-    unsigned short *last = (unsigned short *)(vga_buf + (VGA_HEIGHT - 1) * VGA_WIDTH * 2);
-    for (i = 0; i < VGA_WIDTH; i++) last[i] = (unsigned short)(vga_attr << 8) | ' ';
+    clock_update();
+    vga_row = terminal_line - terminal_view;
+    move_cursor();
+}
+
+static void terminal_follow_bottom(void) {
+    int bottom = terminal_line - VGA_HEIGHT + 1;
+    if (bottom < 0) bottom = 0;
+    terminal_view = bottom;
+}
+
+static void terminal_newline(void) {
+    terminal_line++;
+    if (terminal_line >= TERMINAL_HISTORY_LINES) {
+        for (int y = 1; y < TERMINAL_HISTORY_LINES; y++)
+            for (int x = 0; x < VGA_WIDTH; x++)
+                terminal_history[y - 1][x] = terminal_history[y][x];
+        terminal_line = TERMINAL_HISTORY_LINES - 1;
+    }
+    terminal_fill_line(terminal_line);
+}
+
+static void terminal_scroll(int direction) {
+    int max_view = terminal_line - VGA_HEIGHT + 1;
+    if (max_view < 0) max_view = 0;
+    if (direction < 0 && terminal_view > 0) terminal_view--;
+    if (direction > 0 && terminal_view < max_view) terminal_view++;
+    terminal_render();
+}
+
+static void clock_stop(void) {
+    if (clock_process_pid >= 0) {
+        process_kill((unsigned int)clock_process_pid);
+        clock_process_pid = -1;
+    }
+    clock_last_second = 0xFF;
+}
+
+static void clock_write_cell(int row, int col, char value) {
+    ((unsigned short *)VGA_BASE)[row * VGA_WIDTH + col] =
+        (unsigned short)(vga_attr << 8) | (unsigned char)value;
+}
+
+static void clock_update(void) {
+    if (clock_process_pid < 0) return;
+
+    unsigned char second = rtc_read(0x00);
+    if (second == clock_last_second) return;
+    clock_last_second = second;
+
+    unsigned char minute = rtc_read(0x02);
+    unsigned char hour = rtc_read(0x04);
+    unsigned char day = rtc_read(0x07);
+    unsigned char month = rtc_read(0x08);
+    unsigned char year = rtc_read(0x09);
+    unsigned char status_b = rtc_read(0x0B);
+
+    if (!(status_b & 0x04)) {
+        second = rtc_bcd_to_binary(second);
+        minute = rtc_bcd_to_binary(minute);
+        hour = rtc_bcd_to_binary(hour & 0x7F);
+        day = rtc_bcd_to_binary(day);
+        month = rtc_bcd_to_binary(month);
+        year = rtc_bcd_to_binary(year);
+    }
+    if (!(status_b & 0x02)) {
+        if (hour & 0x80) hour = (unsigned char)(((hour & 0x7F) + 12) % 24);
+        else hour &= 0x7F;
+    }
+
+    char text[12] = {
+        (char)('0' + hour / 10), (char)('0' + hour % 10), ':',
+        (char)('0' + minute / 10), (char)('0' + minute % 10), ':',
+        (char)('0' + second / 10), (char)('0' + second % 10),
+        ' ', 'U', 'T', 'C'
+    };
+    char date[10] = {
+        '2', '0', (char)('0' + year / 10), (char)('0' + year % 10), '-',
+        (char)('0' + month / 10), (char)('0' + month % 10), '-',
+        (char)('0' + day / 10), (char)('0' + day % 10)
+    };
+    for (int i = 0; i < 12; i++) clock_write_cell(VGA_HEIGHT - 1, 68 + i, text[i]);
+    for (int i = 0; i < 10; i++) clock_write_cell(VGA_HEIGHT - 2, 70 + i, date[i]);
 }
 
 void putchar(char c) {
+    terminal_follow_bottom();
     if (c == '\n') { vga_col = 0; vga_row++; }
     else if (c == '\r') vga_col = 0;
     else if (c == '\b') {
         if (vga_col > 0) {
             vga_col--;
-            unsigned int idx = (vga_row * VGA_WIDTH + vga_col) * 2;
-            vga_buf[idx] = ' '; vga_buf[idx + 1] = vga_attr;
+            terminal_history[terminal_line][vga_col] = (unsigned short)(vga_attr << 8) | ' ';
         }
     } else {
-        unsigned int idx = (vga_row * VGA_WIDTH + vga_col) * 2;
-        vga_buf[idx] = (unsigned char)c; vga_buf[idx + 1] = vga_attr; vga_col++;
+        terminal_history[terminal_line][vga_col] = (unsigned short)(vga_attr << 8) | (unsigned char)c;
+        vga_col++;
     }
-    if (vga_col >= VGA_WIDTH) { vga_col = 0; vga_row++; }
-    if (vga_row >= VGA_HEIGHT) { scroll(); vga_row = VGA_HEIGHT - 1; }
-    move_cursor();
+    if (vga_col >= VGA_WIDTH) { vga_col = 0; terminal_newline(); }
+    if (c == '\n') terminal_newline();
+    terminal_follow_bottom();
+    terminal_render();
 }
 
 void print(const char *str) { while (*str) putchar(*str++); }
 
 void clear_screen() {
-    unsigned short *buf = (unsigned short *)VGA_BASE;
-    for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++) buf[i] = (unsigned short)(vga_attr << 8) | ' ';
-    vga_col = vga_row = 0; move_cursor();
+    vga_col = vga_row = 0;
+    terminal_line = terminal_view = 0;
+    for (int line = 0; line < TERMINAL_HISTORY_LINES; line++)
+        terminal_fill_line(line);
+    terminal_render();
 }
 
 void set_color(unsigned char fg, unsigned char bg) { vga_attr = (bg << 4) | (fg & 0x0F); }
@@ -130,6 +236,7 @@ void set_color(unsigned char fg, unsigned char bg) { vga_attr = (bg << 4) | (fg 
 #define KEYBOARD_STATUS 0x64
 
 static int shift_pressed = 0; 
+static int caps_lock = 0;
 static char kbd_us_normal[] = {
     0, 0, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b', '\t',
     'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n', 0, 'a', 's',
@@ -145,11 +252,13 @@ static char kbd_us_shift[] = {
 
 static unsigned char scancode_to_ascii(unsigned char sc) {
     if (sc >= sizeof(kbd_us_normal)) return 0;
-    if (shift_pressed) {
-        if (sc < sizeof(kbd_us_shift)) return kbd_us_shift[sc];
-        return 0;
+    char normal = kbd_us_normal[sc];
+    if (normal >= 'a' && normal <= 'z') {
+        if (shift_pressed != caps_lock) normal -= 32;
+        return normal;
     }
-    return kbd_us_normal[sc];
+    if (shift_pressed && sc < sizeof(kbd_us_shift)) return kbd_us_shift[sc];
+    return normal;
 }
 
 static void drain_input_buffer(void) {
@@ -160,9 +269,11 @@ static void drain_input_buffer(void) {
     }
 }
 
-static char getchar() {
+static int getchar() {
     unsigned char sc;
+    int extended = 0;
     while (1) {
+        clock_update();
         unsigned char status = inb(0x64);
         
         if (status & 1) {
@@ -171,61 +282,19 @@ static char getchar() {
             // Shift 键处理
             if (sc == 0x2A || sc == 0x36) { shift_pressed = 1; continue; }
             if (sc == 0xAA || sc == 0xB6) { shift_pressed = 0; continue; }
+            if (sc == 0x3A) { caps_lock = !caps_lock; continue; }
+            if (sc == 0x3A) { caps_lock = !caps_lock; continue; }
+            if (sc == 0xE0) { extended = 1; continue; }
+            if (extended) {
+                extended = 0;
+                if (sc == 0x48) return 0x100 + 'U';
+                if (sc == 0x50) return 0x100 + 'D';
+                continue;
+            }
             
             // 只处理按下事件
             if (!(sc & 0x80)) {
-                char ascii = 0;
-                switch(sc) {
-                    case 0x02: ascii = '1'; break;
-                    case 0x03: ascii = '2'; break;
-                    case 0x04: ascii = '3'; break;
-                    case 0x05: ascii = '4'; break;
-                    case 0x06: ascii = '5'; break;
-                    case 0x07: ascii = '6'; break;
-                    case 0x08: ascii = '7'; break;
-                    case 0x09: ascii = '8'; break;
-                    case 0x0A: ascii = '9'; break;
-                    case 0x0B: ascii = '0'; break;
-                    case 0x10: ascii = 'q'; break;
-                    case 0x11: ascii = 'w'; break;
-                    case 0x12: ascii = 'e'; break;
-                    case 0x13: ascii = 'r'; break;
-                    case 0x14: ascii = 't'; break;
-                    case 0x15: ascii = 'y'; break;
-                    case 0x16: ascii = 'u'; break;
-                    case 0x17: ascii = 'i'; break;
-                    case 0x18: ascii = 'o'; break;
-                    case 0x19: ascii = 'p'; break;
-                    case 0x1E: ascii = 'a'; break;
-                    case 0x1F: ascii = 's'; break;
-                    case 0x20: ascii = 'd'; break;
-                    case 0x21: ascii = 'f'; break;
-                    case 0x22: ascii = 'g'; break;
-                    case 0x23: ascii = 'h'; break;
-                    case 0x24: ascii = 'j'; break;
-                    case 0x25: ascii = 'k'; break;
-                    case 0x26: ascii = 'l'; break;
-                    case 0x2C: ascii = 'z'; break;
-                    case 0x2D: ascii = 'x'; break;
-                    case 0x2E: ascii = 'c'; break;
-                    case 0x2F: ascii = 'v'; break;
-                    case 0x30: ascii = 'b'; break;
-                    case 0x31: ascii = 'n'; break;
-                    case 0x32: ascii = 'm'; break;
-                    case 0x39: ascii = ' '; break;
-                    case 0x1C: ascii = '\n'; break;
-                    case 0x0E: ascii = '\b'; break;
-                    case 0x33: ascii = ','; break;
-                    case 0x34: ascii = '.'; break;  
-                    case 0x35: ascii = '/'; break;
-                    default: break;
-                }
-                
-                // Shift 处理
-                if (shift_pressed && ascii >= 'a' && ascii <= 'z') {
-                    ascii = ascii - 32;
-                }
-                
+                char ascii = scancode_to_ascii(sc);
                 if (ascii) return ascii;
             }
         }
@@ -257,9 +326,16 @@ static int getkey() {
 static void readline(char *buf, int max_len) {
     int i = 0;
     while (i < max_len - 1) {
-        char c = getchar();
+        int key = getchar();
+        char c = (char)key;
         if (c == '\n') { putchar('\n'); break; }
         else if (c == '\b') { if (i>0) { putchar('\b'); i--; } }
+        else if (c == '\t') {
+            for (int spaces = 0; spaces < 4 && i < max_len - 1; spaces++) {
+                putchar(' ');
+                buf[i++] = ' ';
+            }
+        }
         else { putchar(c); buf[i++] = c; }
     }
     buf[i] = '\0';
@@ -568,6 +644,7 @@ static void cmd_toolbox(char *arg);
 
 static void cmd_gui(char *arg) {
     (void)arg;
+    clock_stop();
     while (1) {
         clear_screen();
         real_mouse_init();
@@ -920,9 +997,7 @@ static void cmd_toolbox(char *arg) {
     while(1) {
         clear_screen();
         set_color(0x0B, 0x00);
-        print("===================================\n");
         print("       ChlorineOS_OS Multi-Toolbox       \n");
-        print("===================================\n");
         set_color(0x07, 0x00);
         print("1. Advanced Calculator (Decimals & Division)\n");
         print("2. Clock and Calendar\n");
@@ -950,11 +1025,29 @@ static void cmd_toolbox(char *arg) {
 }
 
 static void cmd_ver(char *arg) {
-    set_color(0x0F,0x00); print("ChlorineOS (v2026)\n");
-    set_color(0x07,0x00); print("Engine: VGA Text Mode 80x25\n");
-    print("Please visit");
-    set_color(0x0F,0x00); print(" gz1012a.xyz/sys");
-    set_color(0x07,0x00); print(" for more information\n\n");
+    set_color(0x09,0x00); print("ChlorineOS (v2026 - 1.01)\n");
+    set_color(0x07,0x00); print("Engine: VGA Text Mode 80x25\n\n");
+    print("00000000000000000000000000000000   000000000000000000000\n");
+    print(" 000000000000000000000000000000   0000000000000000000000\n");
+    print("  0000000000000000000000000000   00000000000000000000000\n");
+    print("                  00000000000   0000000000   0000000000 \n");
+    print("                 00000000000   0000000000   0000000000  \n");
+    print("                00000000000   0000000000   0000000000   \n");
+    print("               00000000000   0000000000   0000000000    \n");
+    print("              00000000000   0000000000   0000000000     \n");
+    print("             00000000000   0000000000   0000000000      \n");
+    print("            00000000000   0000000000   0000000000       \n");
+    print("           00000000000   0000000000   0000000000        \n");
+    print("          00000000000   0000000000   0000000000         \n");
+    print("         00000000000   0000000000   0000000000          \n");
+    print("        00000000000   0000000000   0000000000           \n");
+    print("         000000000     00000000     00000000            \n");
+    print("          0000000       000000       000000             \n\n");
+    print("Please visit\n");
+    set_color(0x0A,0x00); print("gz1012a.xyz/sys");
+    set_color(0x07,0x00); print(" or ");
+    set_color(0x0A,0x00); print("github.com/GeorgeZ787/Cl_OS\n");
+    set_color(0x07,0x00); print("for more information\n\n");
 }
 
 static void cmd_cd(char *arg) {
@@ -1004,6 +1097,25 @@ static void cmd_cls(char *arg) {
 }
 
 static void cmd_run(char *arg) {
+    if (arg && arg[0] == 't' && arg[1] == 'i' && arg[2] == 'm' &&
+        arg[3] == 'e' && arg[4] == '.' && arg[5] == 'b' &&
+        arg[6] == 'i' && arg[7] == 'n' && arg[8] == '\0') {
+        if (clock_process_pid >= 0) {
+            print("time.bin is already running.\n");
+            return;
+        }
+        clock_process_pid = process_start_service("time.bin");
+        if (clock_process_pid < 0) {
+            print("Failed to start time.bin\n");
+            return;
+        }
+        clock_last_second = 0xFF;
+        print("Clock process started: PID=");
+        print_int(clock_process_pid);
+        print("\n");
+        clock_update();
+        return;
+    }
     if (!fat32_mounted) {
         print("No FAT32 mounted.\n");
         return;
@@ -1036,6 +1148,19 @@ static void cmd_ps(char *arg) {
 static void cmd_kill(char *arg) {
     if (!arg || arg[0] == '\0') {
         print("Usage: kill <pid>\n");
+        return;
+    }
+    if (arg[0] == 't' && arg[1] == 'i' && arg[2] == 'm' &&
+        arg[3] == 'e' && arg[4] == '.' && arg[5] == 'b' &&
+        arg[6] == 'i' && arg[7] == 'n' && arg[8] == '\0') {
+        if (clock_process_pid < 0 || process_kill_by_name("time.bin") < 0) {
+            print("Process not found: time.bin\n");
+            return;
+        }
+        clock_process_pid = -1;
+        clock_last_second = 0xFF;
+        print("Clock process stopped.\n");
+        terminal_render();
         return;
     }
     int pid = 0;
@@ -1154,7 +1279,7 @@ static void init_keyboard() {
         if (inb(0x64) & 1) {
             unsigned char reply = inb(0x60);
             if (reply == 0x55) {
-                print("Keyboard self-test passed.\n");
+                //print("Keyboard self-test passed.\n");
                 break;
             }
         }
@@ -1175,7 +1300,16 @@ static void shell_entry() {
         int i = 0;
         cmd_buf[0] = '\0';
         while (i < 63) {
-            char c = getchar();
+            int key = getchar();
+            if (key == 0x100 + 'U') {
+                terminal_scroll(-1);
+                continue;
+            }
+            if (key == 0x100 + 'D') {
+                terminal_scroll(1);
+                continue;
+            }
+            char c = (char)key;
             if (c == '\n' || c == '\r') {
                 putchar('\n');
                 break;
@@ -1185,6 +1319,11 @@ static void shell_entry() {
                     putchar('\b');
                     putchar(' ');
                     putchar('\b');
+                }
+            } else if (c == '\t') {
+                for (int spaces = 0; spaces < 4 && i < 63; spaces++) {
+                    putchar(' ');
+                    cmd_buf[i++] = ' ';
                 }
             } else if (c >= 32 && c <= 126) {
                 putchar(c);
@@ -1262,6 +1401,9 @@ void kernel_main() {
 
     // ===== 初始化进程管理 =====
     process_init();
+
+    clear_screen();
+    print("Type 'help' for commands\n");
     
     // ===== 进入主控 Shell =====
     shell_entry();
