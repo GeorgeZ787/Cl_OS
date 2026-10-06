@@ -32,21 +32,37 @@ static inline void outw(unsigned short port, unsigned short data) {
 #define IDE_STATUS      (IDE_BASE + 7)
 #define IDE_COMMAND     (IDE_BASE + 7)
 
-static void ide_wait_not_busy() {
-    while (inb(IDE_STATUS) & 0x80);
+static int ide_wait_not_busy() {
+    int timeout = 1000000;
+    while (timeout-- > 0) {
+        unsigned char status = inb(IDE_STATUS);
+        if (status == 0 || status == 0xFF) return -1;
+        if (!(status & 0x80)) return (status & 0x01) ? -1 : 0;
+    }
+    return -1;
 }
 
-static void ide_wait_drq() {
-    while (!(inb(IDE_STATUS) & 0x08));
+static int ide_wait_drq() {
+    int timeout = 1000000;
+    while (timeout-- > 0) {
+        unsigned char status = inb(IDE_STATUS);
+        if (status == 0 || status == 0xFF || (status & 0x01)) return -1;
+        if (!(status & 0x80) && (status & 0x08)) return 0;
+    }
+    return -1;
+}
+
+static int ide_wait_ready() {
+    int timeout = 1000000;
+    while (timeout-- > 0) {
+        unsigned char status = inb(IDE_STATUS);
+        if (status == 0 || status == 0xFF || (status & 0x01)) return -1;
+        if (!(status & 0x80) && (status & 0x40)) return 0;
+    }
+    return -1;
 }
 
 void ide_init() {
-    unsigned short *vga = (unsigned short *)0xB8000;
-    vga[110] = 0x0F00 | 'I';
-    vga[111] = 0x0F00 | 'D';
-    vga[112] = 0x0F00 | 'E';
-    vga[113] = 0x0F00 | 'S';
-    
     // 等待控制器就绪（加超时）
     int timeout = 100000;
     while (timeout-- > 0) {
@@ -54,23 +70,13 @@ void ide_init() {
         if (!(status & 0x80)) break;
     }
     
-    vga[115] = 0x0F00 | 'R';
-    vga[116] = 0x0F00 | 'E';
-    vga[117] = 0x0F00 | 'A';
-    vga[118] = 0x0F00 | 'D';
-    vga[119] = 0x0F00 | 'Y';
-    
     // 选择主盘
     outb(0x1F6, 0xA0);
-    
-    vga[121] = 0x0F00 | 'D';
-    vga[122] = 0x0F00 | 'O';
-    vga[123] = 0x0F00 | 'N';
-    vga[124] = 0x0F00 | 'E';
 }
 
 int ide_read_sectors(unsigned int lba, unsigned char count, unsigned char *buffer) {
-    ide_wait_not_busy();
+    if (count == 0) return 0;
+    if (ide_wait_not_busy() != 0) return -1;
     outb(IDE_DRIVE, 0xE0 | ((lba >> 24) & 0x0F));
     outb(IDE_SECTOR_COUNT, count);
     outb(IDE_LBA_LOW, (unsigned char)(lba & 0xFF));
@@ -79,8 +85,7 @@ int ide_read_sectors(unsigned int lba, unsigned char count, unsigned char *buffe
     outb(IDE_COMMAND, 0x20);
 
     while (count--) {
-        ide_wait_not_busy();
-        ide_wait_drq();
+        if (ide_wait_drq() != 0) return -1;
         unsigned short *buf = (unsigned short *)buffer;
         for (int i = 0; i < 256; i++) {
             buf[i] = inw(IDE_DATA);
@@ -91,9 +96,8 @@ int ide_read_sectors(unsigned int lba, unsigned char count, unsigned char *buffe
 }
 
 int ide_write_sectors(unsigned int lba, unsigned char count, const unsigned char *buffer) {
-    // 等待驱动器就绪
-    while (!(inb(IDE_STATUS) & 0x40));   // DRDY
-    ide_wait_not_busy();
+    if (count == 0) return 0;
+    if (ide_wait_ready() != 0) return -1;
     outb(IDE_DRIVE, 0xE0 | ((lba >> 24) & 0x0F));
     outb(IDE_SECTOR_COUNT, count);
     outb(IDE_LBA_LOW, (unsigned char)(lba & 0xFF));
@@ -102,23 +106,25 @@ int ide_write_sectors(unsigned int lba, unsigned char count, const unsigned char
     outb(IDE_COMMAND, 0x30);
 
     while (count--) {
-        ide_wait_not_busy();
-        ide_wait_drq();
+        if (ide_wait_drq() != 0) return -1;
         unsigned short *buf = (unsigned short *)buffer;
         for (int i = 0; i < 256; i++) {
             outw(IDE_DATA, buf[i]);
         }
-        ide_wait_not_busy();
+        if (ide_wait_not_busy() != 0) return -1;
         buffer += 512;
     }
     // 缓存刷新
     outb(IDE_COMMAND, 0xE7);
-    ide_wait_not_busy();
+    if (ide_wait_not_busy() != 0) return -1;
     return 0;
 }
 
 void ide_display_info() {
-    ide_wait_not_busy();
+    if (ide_wait_not_busy() != 0) {
+        print("No IDE device.\n");
+        return;
+    }
     outb(IDE_DRIVE, 0xE0);
     outb(IDE_SECTOR_COUNT, 0);
     outb(IDE_LBA_LOW, 0);
@@ -127,8 +133,7 @@ void ide_display_info() {
     outb(IDE_COMMAND, 0xEC);
 
     if (inb(IDE_STATUS) == 0) { print("No IDE device.\n"); return; }
-    ide_wait_not_busy();
-    if (!(inb(IDE_STATUS) & 0x08)) { print("IDENTIFY failed.\n"); return; }
+    if (ide_wait_drq() != 0) { print("IDENTIFY failed.\n"); return; }
 
     unsigned short data[256];
     for (int i=0; i<256; i++) data[i]=inw(IDE_DATA);

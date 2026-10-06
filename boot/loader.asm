@@ -11,13 +11,65 @@ start:
     mov si, msg_loader
     call print16
 
-    ; ===== 关闭中断！ =====
-    cli
-    ; ======================
-
     ; 开启 A20 (BIOS 方法)
     mov ax, 0x2401
     int 0x15
+    xor ax, ax
+    mov ds, ax
+    mov es, ax
+
+    ; Request a 1024x768x24 VBE linear framebuffer.
+    mov ax, 0x4F01
+    mov cx, 0x0118
+    mov di, 0x5000
+    int 0x10
+    cmp ax, 0x004F
+    jne vbe_error
+    xor ax, ax
+    mov ds, ax
+    mov ax, [0x5000]
+    and ax, 0x0081
+    cmp ax, 0x0081
+    jne vbe_error
+    cmp word [0x5012], 1024
+    jne vbe_error
+    cmp word [0x5014], 768
+    jne vbe_error
+    cmp byte [0x5019], 24
+    jne vbe_error
+    cmp byte [0x501B], 6
+    jne vbe_error
+    cmp word [0x5010], 3072
+    jb vbe_error
+    cmp dword [0x5028], 0
+    je vbe_error
+
+    ; Keep the BIOS VGA text mode active until the GUI requests VBE.
+    ; Copy the BIOS 8x8 font for rendering text in the graphical desktop.
+    mov ax, 0x1130
+    mov bh, 0x03
+    int 0x10
+    push ds
+    push es
+    push si
+    push di
+    push cx
+    mov si, bp
+    push es
+    pop ds
+    xor ax, ax
+    mov es, ax
+    mov di, 0x6000
+    mov cx, 2048
+    cld
+    rep movsb
+    pop cx
+    pop di
+    pop si
+    pop es
+    pop ds
+
+    cli
 
     ; 加载 GDT
     lgdt [gdtdesc]
@@ -40,11 +92,18 @@ pmode:
     mov ss, ax
     mov esp, 0x90000
 
-    ; 显示 "P" 确认进入保护模式
-    mov word [0xB8000], 0x0F50   ; 'P'
-
     ; 跳转到内核
     jmp 0x10000
+
+vbe_error:
+    xor ax, ax
+    mov ds, ax
+    mov si, msg_vbe_error
+    call print16
+    cli
+.halt:
+    hlt
+    jmp .halt
 
 ; -------- 16位打印 --------
 [bits 16]
@@ -64,6 +123,7 @@ print16:
     ret
 
 msg_loader db "L", 13, 10, 0
+msg_vbe_error db "VBE 1024x768x24 unavailable", 13, 10, 0
 
 ; -------- GDT --------
 align 8
