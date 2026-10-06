@@ -1,14 +1,19 @@
 [bits 32]
 global _start
-global vbe_set_mode_runtime
 extern kernel_main
+extern __bss_start
+extern __bss_end
 
 _start:
-    mov esp, 0x30000
+    mov esp, 0x90000
     mov ebp, esp
 
-    ; 显示 "K" 确认进入内核
-    mov word [0xB8002], 0x0F4B   ; 'K'
+    mov edi, __bss_start
+    mov ecx, __bss_end
+    sub ecx, edi
+    xor eax, eax
+    cld
+    rep stosb
 
     call kernel_main
 
@@ -16,122 +21,118 @@ _start:
     hlt
     jmp $
 
-; Runtime BIOS bridge. The kernel runs in 32-bit protected mode, so BIOS
-; services must only be called after temporarily returning to real mode.
-vbe_set_mode_runtime:
-    pushad
-    mov eax, [esp + 36]
-    mov [0x8FE0], eax
-    mov [0x8FE4], esp
+global video_set_mode
+video_set_mode:
+    push ebx
+    push esi
+    push edi
+    push ebp
+    mov eax, [esp + 20]
+    mov [video_requested_mode], eax
+    pushfd
+    pop eax
+    mov [video_saved_flags], eax
+    mov [video_saved_esp], esp
+    sidt [video_saved_idtr]
+    cli
+    lgdt [video_gdtr]
+    db 0xEA
+    dd video_pm16_entry - _start
+    dw 0x0018
+
+[bits 16]
+video_pm16_entry:
     mov eax, cr0
     and eax, 0xFFFFFFFE
     mov cr0, eax
-    jmp 0x1000:(runtime_real_entry - 0x10000)
+    db 0xEA
+    dw video_real_entry - _start
+    dw 0x1000
 
-[bits 16]
-runtime_real_entry:
-    xor ax, ax
+video_real_entry:
+    mov ax, 0x1000
     mov ds, ax
     mov es, ax
-    mov fs, ax
-    mov gs, ax
+    xor ax, ax
     mov ss, ax
-    mov sp, 0xFF00
-    ; Keep interrupts disabled: the current IDT is a protected-mode IDT,
-    ; and using it while executing BIOS real-mode code can hang the machine.
+    mov sp, 0x7000
 
-    mov ax, [0x8FE0]
+    lidt [cs:video_real_idtr - _start]
+    mov word [video_result - _start], 0
+    mov ax, [video_requested_mode - _start]
     cmp ax, 0x0003
-    je runtime_text_mode
-
-    ; Prefer the known 1024x768x16 mode, then try the alternate VBE mode.
-    mov cx, 0x0117
-    call runtime_try_vbe_mode
-    jc runtime_try_mode_118
-    jmp runtime_return_protected
-
-runtime_try_mode_118:
-    mov cx, 0x0118
-    call runtime_try_vbe_mode
-    jc runtime_vbe_failed
-    jmp runtime_return_protected
-
-runtime_try_vbe_mode:
-    push cx
-    mov ax, 0x4F01
-    mov di, 0x9200
-    int 0x10
-    cmp ax, 0x004F
-    jne .fail_pop
-
+    je .set_text_mode
+    mov ax, [video_requested_mode - _start]
+    mov bx, ax
     mov ax, 0x4F02
-    pop cx
-    mov bx, cx
-    or bx, 0x4000
     int 0x10
     cmp ax, 0x004F
-    jne .fail
-
-    mov eax, [0x9228]
-    mov [0x9000], eax
-    xor eax, eax
-    mov ax, [0x9210]
-    mov [0x9004], eax
-    xor eax, eax
-    mov ax, [0x9212]
-    mov [0x9008], eax
-    xor eax, eax
-    mov ax, [0x9214]
-    mov [0x900A], eax
-    mov ax, [0x9219]
-    mov [0x900C], al
-    mov byte [0x900D], 1
-    clc
-    ret
-
-.fail:
-    stc
-    ret
-
-.fail_pop:
-    pop cx
-    stc
-    ret
-
-runtime_vbe_failed:
-    mov dword [0x9000], 0
-    mov byte [0x900D], 0
-    jmp runtime_return_protected
-
-runtime_text_mode:
+    jne .restore_protected_mode
+    jmp .mode_set
+.set_text_mode:
     mov ax, 0x0003
     int 0x10
-    mov dword [0x9000], 0
-    mov word [0x9004], 160
-    mov word [0x9008], 80
-    mov word [0x900A], 25
-    mov byte [0x900C], 0
-    mov byte [0x900D], 0
-    jmp runtime_return_protected
-
-runtime_return_protected:
+    ; Reapply mode 3 so BIOS returns to the standard 80-column VGA layout.
+    mov ax, 0x0003
+    int 0x10
+.text_mode_set:
+    mov ax, 0x0200
+    xor bx, bx
+    xor dx, dx
+    int 0x10
+    mov ax, 0x0106
+    mov cx, 0x0607
+    int 0x10
+.mode_set:
+    mov ax, 0x1000
+    mov ds, ax
+    mov word [video_result - _start], 1
+.restore_protected_mode:
     cli
+    o32 lidt [cs:video_saved_idtr - _start]
+    lgdt [cs:video_gdtr - _start]
     mov eax, cr0
     or eax, 1
     mov cr0, eax
-    ; The CPU is still decoding 16-bit instructions until this jump.
-    ; Assemble the far jump with a 32-bit offset so the 0x10000 kernel
-    ; address does not produce an R_386_16 relocation.
-[bits 32]
-    jmp 0x08:runtime_protected_return
+    db 0x66, 0xEA
+    dd video_protected_entry
+    dw 0x0008
 
-runtime_protected_return:
-    mov ax, 0x10
+[bits 32]
+video_protected_entry:
+    mov ax, 0x0010
     mov ds, ax
     mov es, ax
     mov fs, ax
     mov gs, ax
     mov ss, ax
-    mov esp, [0x8FE4]
-    popad
+    mov esp, [video_saved_esp]
+    pop ebp
+    pop edi
+    pop esi
+    pop ebx
+    movzx eax, word [video_result]
+    push dword [video_saved_flags]
+    popfd
     ret
+
+align 8
+video_gdt:
+    dq 0
+    dq 0x00CF9A000000FFFF
+    dq 0x00CF92000000FFFF
+    dq 0x00009A010000FFFF
+video_gdt_end:
+video_gdtr:
+    dw video_gdt_end - video_gdt - 1
+    dd video_gdt
+
+align 4
+video_requested_mode: dd 0
+video_saved_flags: dd 0
+video_saved_esp: dd 0
+video_result: dw 0
+video_saved_idtr: times 6 db 0
+video_real_idtr:
+    dw 0x03FF
+    dd 0

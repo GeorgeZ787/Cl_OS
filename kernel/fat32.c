@@ -104,7 +104,7 @@ static int find_file(const char *name, unsigned int *cluster, unsigned int *size
         FAT32_DirEntry *dir = (FAT32_DirEntry *)cluster_buffer;
         for (unsigned int i = 0; i < entries_per_cluster; i++) {
             if (dir[i].name[0] == 0) return -1;
-            if (dir[i].name[0] == 0xE5) continue;
+            if ((unsigned char)dir[i].name[0] == 0xE5) continue;
             if (dir[i].attributes == 0x0F) continue;
             if (dir[i].attributes & 0x08) continue;
 
@@ -305,7 +305,7 @@ int fat32_create_file(const char *name) {
         if (read_cluster(cluster, cluster_buf) != 0) return -1;
         FAT32_DirEntry *dir = (FAT32_DirEntry *)cluster_buf;
         for (unsigned int k = 0; k < entries_per_cluster; k++) {
-            if (dir[k].name[0] == 0 || dir[k].name[0] == 0xE5) {
+            if (dir[k].name[0] == 0 || (unsigned char)dir[k].name[0] == 0xE5) {
                 unsigned char *entry = (unsigned char *)&dir[k];
                 for (int m = 0; m < sizeof(FAT32_DirEntry); m++) entry[m] = 0;
                 for (int m = 0; m < 11; m++) dir[k].name[m] = fat_name[m];
@@ -394,7 +394,7 @@ static int find_in_directory(unsigned int dir_cluster, const char *name, FAT32_D
         
         for (unsigned int i = 0; i < entries_per_cluster; i++) {
             if (dir[i].name[0] == 0) return -1;
-            if (dir[i].name[0] == 0xE5) continue;
+            if ((unsigned char)dir[i].name[0] == 0xE5) continue;
             if (dir[i].attributes == ATTR_LONG_NAME) continue;
             if (dir[i].attributes & ATTR_VOLUME_ID) continue;
 
@@ -440,7 +440,7 @@ static unsigned int resolve_path(const char *path) {
                 unsigned char *cluster_buf = (unsigned char *)0x40000;
                 if (read_cluster(current_cluster, cluster_buf) != 0) return 0xFFFFFFFF;
                 FAT32_DirEntry *dir = (FAT32_DirEntry *)cluster_buf;
-                if (dir[1].name[0] != 0xE5 && dir[1].name[0] != 0) {
+                if ((unsigned char)dir[1].name[0] != 0xE5 && dir[1].name[0] != 0) {
                     current_cluster = get_entry_cluster(&dir[1]);
                 } else {
                     current_cluster = 0;
@@ -574,6 +574,46 @@ void fat32_list_current_directory() {
     print("----------------------------------------\n");
 }
 
+int fat32_get_current_directory_entry(unsigned int index, char *name, int name_size,
+                                     unsigned int *size, int *is_directory) {
+    if (!name || name_size < 1) return -1;
+    name[0] = '\0';
+    unsigned char *cluster_buf = (unsigned char *)0x40000;
+    unsigned int cluster = current_dir_cluster ? current_dir_cluster : root_cluster;
+    unsigned int entries_per_cluster = (sectors_per_cluster * bytes_per_sector) / sizeof(FAT32_DirEntry);
+
+    while (cluster >= 2 && cluster < 0x0FFFFFF8) {
+        if (read_cluster(cluster, cluster_buf) != 0) return -1;
+        FAT32_DirEntry *dir = (FAT32_DirEntry *)cluster_buf;
+        for (unsigned int i = 0; i < entries_per_cluster; i++) {
+            unsigned char first = dir[i].name[0];
+            if (first == 0x00) return 0;
+            if (first == 0xE5 || dir[i].attributes == ATTR_LONG_NAME ||
+                (dir[i].attributes & ATTR_VOLUME_ID)) continue;
+            if (first == '.' &&
+                (dir[i].name[1] == ' ' ||
+                 (dir[i].name[1] == '.' && dir[i].name[2] == ' '))) continue;
+            if (index > 0) {
+                index--;
+                continue;
+            }
+
+            int pos = 0;
+            for (int j = 0; j < 8 && dir[i].name[j] != ' '; j++)
+                if (pos < name_size - 1) name[pos++] = dir[i].name[j];
+            if (dir[i].name[8] != ' ' && pos < name_size - 1) name[pos++] = '.';
+            for (int j = 8; j < 11 && dir[i].name[j] != ' '; j++)
+                if (pos < name_size - 1) name[pos++] = dir[i].name[j];
+            name[pos] = '\0';
+            if (size) *size = dir[i].file_size;
+            if (is_directory) *is_directory = (dir[i].attributes & ATTR_DIRECTORY) != 0;
+            return 1;
+        }
+        cluster = read_fat_entry(cluster);
+    }
+    return 0;
+}
+
 int fat32_create_directory(const char *name) {
     char fat_name[11];
     make_83_name(name, fat_name);
@@ -600,7 +640,7 @@ int fat32_create_directory(const char *name) {
         if (read_cluster(cluster, cluster_buf) != 0) return -1;
         FAT32_DirEntry *dir = (FAT32_DirEntry *)cluster_buf;
         for (unsigned int k = 0; k < entries_per_cluster; k++) {
-            if (dir[k].name[0] == 0 || dir[k].name[0] == 0xE5) {
+            if (dir[k].name[0] == 0 || (unsigned char)dir[k].name[0] == 0xE5) {
                 unsigned char *entry = (unsigned char *)&dir[k];
                 for (int m = 0; m < sizeof(FAT32_DirEntry); m++) entry[m] = 0;
                 for (int m = 0; m < 11; m++) dir[k].name[m] = fat_name[m];

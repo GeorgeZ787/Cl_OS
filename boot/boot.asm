@@ -111,6 +111,19 @@ start:
     int 0x13
     jc error
 
+    ; 第7块：读取内核扩展（柱面3，磁头0）的剩余扇区
+    mov ax, 0x1D40
+    mov es, ax
+    xor bx, bx
+    mov ah, 0x02
+    mov al, 18
+    mov ch, 3
+    mov cl, 1
+    mov dh, 0
+    mov dl, [drive]
+    int 0x13
+    jc error
+
     ; 跳转到 loader
     jmp 0x0000:0x8000
 

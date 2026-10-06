@@ -66,6 +66,8 @@ int fat32_delete_file(const char *name);
 int fat32_create_directory(const char *name);
 int fat32_change_directory(const char *path);
 void fat32_list_current_directory();
+int fat32_get_current_directory_entry(unsigned int index, char *name, int name_size,
+                                      unsigned int *size, int *is_directory);
 void fat32_get_current_path(char *buffer, int size);
 
 #endif
