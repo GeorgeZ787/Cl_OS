@@ -1911,7 +1911,7 @@ static void cmd_gui(char *arg) {
     }
 }
 
-/* =============== 贪吃蛇 =============== */
+/* snake */
 #define SNAKE_MAP_W 60
 #define SNAKE_MAP_H 20
 static unsigned int s_seed = 54321;
@@ -1959,11 +1959,11 @@ static void cmd_snake(char *arg) {
     while(inb(0x64)&1)inb(0x60); while(!(inb(0x64)&1)); inb(0x60); clear_screen();
 }
 
-/* =============== 改进的 auto_mount =============== */
+/* auto_mount */
 static void auto_mount() {
     ide_init();
     
-    // ===== 直接挂载整个硬盘（不检查 MBR） =====
+    //  直接挂载整个硬盘（不检查 MBR） 
     int ret = fat32_init(0);
     
     if (ret == 0) {
@@ -2019,7 +2019,7 @@ static void auto_mount() {
     fat32_mounted = 0;
 }
 
-/* =============== 命令实现 =============== */
+/* 命令实现*/
 static void cmd_cat(char *arg) {
     if (!fat32_mounted) {
         print("No FAT32 mounted.\n");
@@ -2149,7 +2149,7 @@ static void cmd_toolbox(char *arg) {
 }
 
 static void cmd_ver(char *arg) {
-    set_color(0x09,0x00); print("ChlorineOS (v26.1.03)\n");
+    set_color(0x09,0x00); print("ChlorineOS (v26.2.01)\n");
     set_color(0x07,0x00); print("Engine: VGA Text Mode 80x25\n\n");
     set_color(0x09,0x00);
     print(" 0000000000000000000000000000   000000000000000000000\n");
@@ -2432,7 +2432,7 @@ static void set_idt_gate(int n, unsigned int handler) {
     idt[n].offset_high = (handler >> 16) & 0xFFFF;
 }
 
-/* =============== 核心解析循环 =============== */
+/*  核心解析循环 */
 static void init_idt() {
     idtp.limit = sizeof(idt) - 1;
     idtp.base = (unsigned int)idt;
@@ -2483,9 +2483,7 @@ static void init_keyboard() {
     outb(0x60, 0xF4);  
 }
 
-// ============================================================
 // Shell 主控环境
-// ============================================================
 static void shell_entry() {
     char cmd_buf[64];
     while (1) {
@@ -2566,7 +2564,7 @@ static void shell_entry() {
     }
 }
 
-// ===== kernel_main - 真正活起来 =====
+// main
 void kernel_main() {
     clear_screen();
 
@@ -2586,13 +2584,13 @@ void kernel_main() {
         print("Warning: No FAT32 partition found.\n");
     }
 
-    // ===== 初始化进程管理 =====
+    // 初始化进程管理 
     process_init();
 
     clear_screen();
     print("Type 'help' for commands\n");
     
-    // ===== 进入主控 Shell =====
+    // 进入主控 Shell
     shell_entry();
     
     // 不会执行到这里

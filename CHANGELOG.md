@@ -1,16 +1,12 @@
 # Changelog
-## [v26.1.03] -
+## [v26.1.03] - 2026-10-05
 **[For more information](./docs/updates/v26103.md)**
 ### Added
 - A new `ver` interface
+- A new `GUI` interface
 
 ### Fixed
 - `ver` interface can not show the correct version number
-
-### Problems
-
-## Unreleased
-### Fixed
 - Kept startup and the CLI in VGA text mode; switched to the VBE framebuffer only when `gui` is run.
 - Made all desktop icons visible and clickable at 1024x768.
 - Added an explicit desktop exit-to-CLI button that restores VGA text mode; ESC no longer leaves the desktop.
@@ -27,6 +23,10 @@
 - Corrected FAT32 deleted-entry checks for signed directory-name bytes.
 - Created the build directory automatically when compiling from a clean checkout.
 - Created the FAT32 hard disk image automatically when running QEMU if it is missing.
+
+### Problems
+- Screen will flick a lot when you are in GUI mode.
+
 
 ## [v26.1.02] - 2026-09-09
 **[For more information](./docs/updates/v26102.md)**
