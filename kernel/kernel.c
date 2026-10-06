@@ -302,7 +302,7 @@ static int getchar() {
 }
 
 static int extended_key = 0;
-static int getkey() {
+static int getkey(void) {
     while (1) {
         unsigned char status;
         while (!((status = inb(0x64)) & 1));
@@ -638,129 +638,170 @@ static void g_flush(void) {
     for (int y = 0; y < 25; y++) for (int x = 0; x < 80; x++) vga[y * 80 + x] = g_buf[y * 100 + x];
 }
 
-static void cmd_ls(char *arg);
-static void cmd_snake(char *arg);
-static void cmd_toolbox(char *arg);
+static int getkey(void);
+extern void vbe_set_mode_runtime(unsigned int mode);
+
+#define VBE_META_BASE 0x9000
+#define VBE_LFB_PTR (*(volatile unsigned int *)(VBE_META_BASE + 0x00))
+#define VBE_PITCH   (*(volatile unsigned short *)(VBE_META_BASE + 0x04))
+#define VBE_WIDTH   (*(volatile unsigned short *)(VBE_META_BASE + 0x08))
+#define VBE_HEIGHT  (*(volatile unsigned short *)(VBE_META_BASE + 0x0A))
+#define VBE_BPP     (*(volatile unsigned char *)(VBE_META_BASE + 0x0C))
+#define VBE_ACTIVE  (*(volatile unsigned char *)(VBE_META_BASE + 0x0D))
+
+static void vbe_set_text_mode(void) {
+    vbe_set_mode_runtime(0x0003);
+    clear_screen();
+}
+
+static void vbe_fill_rect(unsigned int x, unsigned int y, unsigned int w,
+                          unsigned int h, unsigned short color) {
+    unsigned int pitch_pixels = VBE_PITCH / 2;
+    if (!VBE_ACTIVE || !VBE_LFB_PTR || !VBE_PITCH) return;
+    if (VBE_BPP == 32) {
+        volatile unsigned int *fb32 = (volatile unsigned int *)VBE_LFB_PTR;
+        unsigned int color32 = 0x00000000 | color;
+        for (unsigned int py = y; py < y + h && py < VBE_HEIGHT; py++) {
+            for (unsigned int px = x; px < x + w && px < VBE_WIDTH; px++)
+                fb32[(py * (unsigned int)VBE_PITCH / 4) + px] = color32;
+        }
+        return;
+    }
+    if (VBE_BPP != 16) return;
+    volatile unsigned short *fb = (volatile unsigned short *)VBE_LFB_PTR;
+    for (unsigned int py = y; py < y + h && py < VBE_HEIGHT; py++) {
+        for (unsigned int px = x; px < x + w && px < VBE_WIDTH; px++)
+            fb[py * pitch_pixels + px] = color;
+    }
+}
+
+static unsigned char vbe_glyph_row(char c, int row) {
+    static const unsigned char blank[7] = {0, 0, 0, 0, 0, 0, 0};
+    static const unsigned char glyphs[][7] = {
+        {0x1E,0x11,0x11,0x11,0x11,0x11,0x1E}, /* C */
+        {0x11,0x11,0x11,0x11,0x11,0x11,0x1F}, /* L */
+        {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E}, /* O */
+        {0x1E,0x11,0x11,0x1E,0x04,0x11,0x1E}, /* S */
+        {0x1F,0x04,0x04,0x04,0x04,0x04,0x04}, /* T */
+        {0x11,0x11,0x11,0x0A,0x0A,0x04,0x04}, /* V */
+        {0x11,0x11,0x11,0x15,0x15,0x15,0x0A}, /* W */
+        {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11}, /* X */
+        {0x11,0x11,0x0A,0x04,0x04,0x04,0x04}, /* Y */
+        {0x1F,0x04,0x04,0x04,0x04,0x04,0x1F}, /* I */
+        {0x1E,0x11,0x11,0x1E,0x14,0x12,0x11}, /* R */
+        {0x11,0x1B,0x15,0x15,0x11,0x11,0x11}, /* M */
+        {0x11,0x19,0x15,0x13,0x11,0x11,0x11}, /* N */
+        {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E}, /* D/O */
+        {0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F}, /* E */
+        {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10}, /* F */
+        {0x0E,0x11,0x01,0x0D,0x11,0x11,0x0E}, /* G */
+        {0x11,0x11,0x11,0x1F,0x11,0x11,0x11}, /* H */
+        {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E}, /* Q */
+        {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E}  /* U */
+    };
+    const char chars[] = "CLOSTVWXYIRMNDEFGHQU";
+    if (c >= 'a' && c <= 'z') c -= 32;
+    for (int i = 0; chars[i]; i++)
+        if (chars[i] == c) return glyphs[i][row];
+    if (c >= '0' && c <= '9') {
+        static const unsigned char digits[10][7] = {
+            {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E},
+            {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E},
+            {0x0E,0x11,0x01,0x02,0x04,0x08,0x1F},
+            {0x1E,0x01,0x01,0x0E,0x01,0x01,0x1E},
+            {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02},
+            {0x1F,0x10,0x10,0x1E,0x01,0x01,0x1E},
+            {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E},
+            {0x1F,0x01,0x02,0x04,0x08,0x08,0x08},
+            {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E},
+            {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C}
+        };
+        return digits[c - '0'][row];
+    }
+    if (c == '-') return row == 3 ? 0x1F : 0;
+    if (c == '_') return row == 6 ? 0x1F : 0;
+    if (c == ':') return (row == 2 || row == 5) ? 0x04 : 0;
+    return blank[row];
+}
+
+static void vbe_draw_char(int x, int y, char c, unsigned short color, int scale) {
+    for (int row = 0; row < 7; row++) {
+        unsigned char bits = vbe_glyph_row(c, row);
+        for (int col = 0; col < 5; col++) {
+            if (bits & (1 << (4 - col)))
+                vbe_fill_rect(x + col * scale, y + row * scale,
+                              scale, scale, color);
+        }
+    }
+}
+
+static void vbe_draw_text(int x, int y, const char *text,
+                          unsigned short color, int scale) {
+    while (*text) {
+        vbe_draw_char(x, y, *text++, color, scale);
+        x += 6 * scale;
+    }
+}
+
+static void vbe_draw_page(void) {
+    vbe_fill_rect(0, 0, VBE_WIDTH, VBE_HEIGHT, 0x1020);
+    vbe_fill_rect(32, 32, VBE_WIDTH - 64, VBE_HEIGHT - 64, 0x1830);
+    vbe_fill_rect(32, 32, VBE_WIDTH - 64, 56, 0x1F80);
+    vbe_draw_text(56, 48, "CL_OS GUI", 0xFFFF, 4);
+    vbe_draw_text(56, 150, "TYPE CLI THEN ENTER", 0xFFFF, 3);
+    vbe_fill_rect(56, 210, VBE_WIDTH - 112, 3, 0xFFFF);
+}
+
+static int vbe_is_cli(const char *text, int len) {
+    return len == 3 &&
+        ((text[0] | 0x20) == 'c') &&
+        ((text[1] | 0x20) == 'l') &&
+        ((text[2] | 0x20) == 'i');
+}
+
+static void vbe_gui_render(const char *input, int input_len) {
+    vbe_draw_page();
+    vbe_draw_text(56, 245, input, 0xFFFF, 3);
+    vbe_fill_rect(56 + input_len * 18, 242, 12, 28, 0xFFFF);
+}
 
 static void cmd_gui(char *arg) {
     (void)arg;
     clock_stop();
-    while (1) {
-        clear_screen();
-        real_mouse_init();
-
-        int v_mx = 40, v_my = 12;
-        unsigned char m_bytes[3];
-        int m_cycle = 0;
-        int gui_ext_key = 0;
-        int trigger_app = 0;
-
-        while (trigger_app == 0) {
-            for (int y = 0; y < 40; y++) for (int x = 0; x < 100; x++) g_cell(x, y, ' ', 0x11);
-            for (int x = 0; x < 100; x++) g_cell(x, 0, ' ', 0x70);
-            const char *tt = " Chlorine_OS - GUI"; for (int i=0; tt[i]; i++) g_cell(2+i, 0, tt[i], 0x70);
-            
-            int c1 = 0x0B, c2 = 0x0E, c3 = 0x0A, c4 = 0x0C, c5 = 0x09;
-            g_cell(10,5,0xDB,c1); g_cell(11,5,0xDB,c1); g_cell(10,6,0xDB,c1); g_cell(11,6,0xDB,c1);
-            const char *i1="Files"; for(int i=0; i1[i]; i++) g_cell(9+i, 7, i1[i], 0x0F);
-            
-            g_cell(30,5,0xDB,c2); g_cell(31,5,0xDB,c2); g_cell(30,6,0xDB,c2); g_cell(31,6,0xDB,c2);
-            const char *i2="Editor"; for(int i=0; i2[i]; i++) g_cell(29+i, 7, i2[i], 0x0F);
-            
-            g_cell(50,5,0xDB,c3); g_cell(51,5,0xDB,c3); g_cell(50,6,0xDB,c3); g_cell(51,6,0xDB,c3);
-            const char *i3="Snake"; for(int i=0; i3[i]; i++) g_cell(49+i, 7, i3[i], 0x0F);
-
-            g_cell(70,5,0xDB,c4); g_cell(71,5,0xDB,c4); g_cell(70,6,0xDB,c4); g_cell(71,6,0xDB,c4);
-            const char *i4="Terminal"; for(int i=0; i4[i]; i++) g_cell(68+i, 7, i4[i], 0x0F);
-
-            g_cell(88,5,0xDB,c5); g_cell(89,5,0xDB,c5); g_cell(88,6,0xDB,c5); g_cell(89,6,0xDB,c5);
-            const char *i5="Toolbox"; for(int i=0; i5[i]; i++) g_cell(86+i, 7, i5[i], 0x0F);
-
-            g_cell(v_mx, v_my, 'X', 0x0F); 
-            g_flush();
-
-            unsigned char status = inb(0x64);
-            if (status & 1) {
-                unsigned char data = inb(0x60);
-                if (status & 0x20) {
-                    switch (m_cycle) {
-                        case 0: if (data & 0x08) { m_bytes[0] = data; m_cycle++; } break;
-                        case 1: m_bytes[1] = data; m_cycle++; break;
-                        case 2:
-                            m_bytes[2] = data; m_cycle = 0;
-                            int dx = m_bytes[1] - ((m_bytes[0] << 4) & 0x100);
-                            int dy = m_bytes[2] - ((m_bytes[0] << 3) & 0x100);
-                            v_mx += dx / 2; v_my -= dy / 2;
-                            
-                            if (m_bytes[0] & 1) {
-                                if (v_mx>=8 && v_mx<=14 && v_my>=4 && v_my<=8) trigger_app = 1;
-                                if (v_mx>=28 && v_mx<=34 && v_my>=4 && v_my<=8) trigger_app = 2;
-                                if (v_mx>=48 && v_mx<=54 && v_my>=4 && v_my<=8) trigger_app = 3;
-                                if (v_mx>=68 && v_mx<=74 && v_my>=4 && v_my<=8) trigger_app = 4;
-                                if (v_mx>=86 && v_mx<=92 && v_my>=4 && v_my<=8) trigger_app = 5;
-                            }
-                            break;
-                    }
-                } else {
-                    m_cycle = 0;
-                    if (data == 0xE0) { gui_ext_key = 1; }
-                    else if (gui_ext_key) {
-                        gui_ext_key = 0;
-                        if (data == 0x48) v_my -= 2;
-                        else if (data == 0x50) v_my += 2;
-                        else if (data == 0x4B) v_mx -= 2;
-                        else if (data == 0x4D) v_mx += 2;
-                    } else if (!(data & 0x80)) {
-                        if (data == 0x01) { trigger_app = -1; break; }
-                        if (data == 0x11) v_my--;
-                        if (data == 0x1F) v_my++;
-                        if (data == 0x1E) v_mx--;
-                        if (data == 0x20) v_mx++;
-                        if (data == 0x48) v_my -= 2;
-                        if (data == 0x50) v_my += 2;
-                        if (data == 0x4B) v_mx -= 2;
-                        if (data == 0x4D) v_mx += 2;
-
-                        if (data == 0x39 || data == 0x1C) {
-                            if (v_mx>=8 && v_mx<=14 && v_my>=4 && v_my<=8) trigger_app = 1;
-                            if (v_mx>=28 && v_mx<=34 && v_my>=4 && v_my<=8) trigger_app = 2;
-                            if (v_mx>=48 && v_mx<=54 && v_my>=4 && v_my<=8) trigger_app = 3;
-                            if (v_mx>=68 && v_mx<=74 && v_my>=4 && v_my<=8) trigger_app = 4;
-                            if (v_mx>=86 && v_mx<=92 && v_my>=4 && v_my<=8) trigger_app = 5;
-                        }
-                    }
-                }
-            }
-
-            if (v_mx < 0) v_mx = 0; if (v_mx > 99) v_mx = 99; 
-            if (v_my < 0) v_my = 0; if (v_my > 39) v_my = 39;
-            for (volatile int delay = 0; delay < 20000; delay++);
-        }
-
-        mouse_disable();
-
-        if (trigger_app == -1 || trigger_app == 4) {
-            clear_screen();
-            if (trigger_app == 4) print("Switched to Terminal Mode.\n");
-            return;
-        }
-
-        clear_screen();
-        if (trigger_app == 1) {
-            cmd_ls("");
-            print("\nPress ESC to return to GUI...");
-            while (getkey() != 27);
-        }
-        else if (trigger_app == 2) {
-            print("Enter file to edit: ");
-            char buf[24];
-            readline(buf, 24);
-            uppercase(buf);
-            window_text_editor(buf);
-        }
-        else if (trigger_app == 3) { cmd_snake(""); }
-        else if (trigger_app == 5) { cmd_toolbox(""); }
+    vbe_set_mode_runtime(0x4117);
+    if (!VBE_ACTIVE) {
+        print("VBE modes 117h/118h are unavailable; staying in CLI mode.\n");
+        return;
     }
+    /* GUI is a separate full-screen page. Do not call print() or return to
+     * shell_entry() until the GUI-specific cli command has been entered. */
+    vbe_draw_page();
+    char input[32];
+    int input_len = 0;
+    input[0] = '\0';
+    vbe_gui_render(input, input_len);
+    while (1) {
+        int key = getkey();
+        if (key == '\b') {
+            if (input_len > 0) input[--input_len] = '\0';
+        } else if (key == '\n' || key == '\r') {
+            if (vbe_is_cli(input, input_len)) break;
+            input_len = 0;
+            input[0] = '\0';
+        } else if (key >= 32 && key <= 126 && input_len < 31) {
+            input[input_len++] = (char)key;
+            input[input_len] = '\0';
+        }
+        vbe_gui_render(input, input_len);
+    }
+    vbe_set_text_mode();
+    print("CLI mode restored.\n");
+}
+
+static void cmd_cli(char *arg) {
+    (void)arg;
+    vbe_set_text_mode();
+    print("CLI mode restored.\n");
 }
 
 /* =============== 贪吃蛇 =============== */
@@ -1025,29 +1066,45 @@ static void cmd_toolbox(char *arg) {
 }
 
 static void cmd_ver(char *arg) {
-    set_color(0x09,0x00); print("ChlorineOS (v2026 - 1.01)\n");
+    set_color(0x09,0x00); print("ChlorineOS (v26.1.03)\n");
     set_color(0x07,0x00); print("Engine: VGA Text Mode 80x25\n\n");
-    print("00000000000000000000000000000000   000000000000000000000\n");
-    print(" 000000000000000000000000000000   0000000000000000000000\n");
-    print("  0000000000000000000000000000   00000000000000000000000\n");
-    print("                  00000000000   0000000000   0000000000 \n");
-    print("                 00000000000   0000000000   0000000000  \n");
-    print("                00000000000   0000000000   0000000000   \n");
-    print("               00000000000   0000000000   0000000000    \n");
-    print("              00000000000   0000000000   0000000000     \n");
-    print("             00000000000   0000000000   0000000000      \n");
-    print("            00000000000   0000000000   0000000000       \n");
-    print("           00000000000   0000000000   0000000000        \n");
-    print("          00000000000   0000000000   0000000000         \n");
-    print("         00000000000   0000000000   0000000000          \n");
-    print("        00000000000   0000000000   0000000000           \n");
-    print("         000000000     00000000     00000000            \n");
-    print("          0000000       000000       000000             \n\n");
-    print("Please visit\n");
-    set_color(0x0A,0x00); print("gz1012a.xyz/sys");
+    set_color(0x09,0x00);
+    print(" 0000000000000000000000000000   000000000000000000000\n");
+    print("  00000000000000000000000000   0000000000000000000000\n");
+    print("   000000000000000000000000   00000000000000000000000\n");
+    print("               00000000000   0000000000   0000000000 \n");
+    print("              00000000000   0000000000   0000000000  \n");
+    print("             00000000000   0000000000   0000000000   \n");
+    print("            00000000000   0000000000   0000000000    \n");
+    print("           00000000000   0000000000   0000000000     \n");
+    print("          00000000000   0000000000   0000000000      \n");
+    print("         00000000000   0000000000   0000000000       \n");
+    print("        00000000000   0000000000   0000000000        \n");
+    print("       00000000000   0000000000   0000000000  ");
+    set_color(0x07,0x00); 
+    print("Architecture: x86 (32-bit)\n");
+    set_color(0x09,0x00);
+    print("      00000000000   0000000000   0000000000   ");
+    set_color(0x07,0x00); 
+    print("Boot Device : Floppy (cl_os.img)\n");
+    set_color(0x09,0x00);
+    print("     00000000000   0000000000   0000000000    ");
+    set_color(0x07,0x00);
+    print("Data Disk   : hdd.img (FAT32)\n");
+    set_color(0x09,0x00);
+    print("      000000000     00000000     00000000     ");
+    set_color(0x07,0x00);
+    print("Memory      : 64 MB\n");
+    set_color(0x09,0x00);
+    print("       0000000       000000       000000      ");
+    set_color(0x07,0x00);
+    print("Date        : ");
+    print(__DATE__); print("\n\n");
+    print("                                Please visit\n");
+    set_color(0x0A,0x00); print("                gz1012a.xyz/sys");
     set_color(0x07,0x00); print(" or ");
     set_color(0x0A,0x00); print("github.com/GeorgeZ787/Cl_OS\n");
-    set_color(0x07,0x00); print("for more information\n\n");
+    set_color(0x07,0x00); print("                            for more information\n\n");
 }
 
 static void cmd_cd(char *arg) {
@@ -1214,6 +1271,7 @@ struct cmd_entry cmd_table[] = {
     {"shut",    "Shutdown VM",          cmd_shutdown},
     {"testmem", "Test kmalloc",         cmd_test_mem},
     {"cls",     "clear screen",         cmd_cls},
+    {"cli",     "Return to text mode",  cmd_cli},
     {NULL, NULL, NULL}
 };
 
