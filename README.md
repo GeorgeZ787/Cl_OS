@@ -1,10 +1,6 @@
 # Chlorine_OS (Cl_OS)
 > A 32-bit x86 operating system running on QEMU
 
-For a detailed Chinese-language overview of the system, boot flow, GUI apps,
-commands, architecture, build steps, and current limitations, see
-[docs/系统介绍.md](docs/系统介绍.md).
-
 ## Functions
 - Command Line Interface (It supports many commands such as `ver` `ls` `cd` `mk` and many more)
 - Supports the FAT32 file system
